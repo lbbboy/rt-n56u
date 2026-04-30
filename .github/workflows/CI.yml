@@ -9,8 +9,6 @@ on:
         description: 'Run the build with tmate debugging enabled'
         required: false
         default: 'no'
-  release:
-    types: [published]
 
 jobs:
   build:
@@ -64,23 +62,15 @@ jobs:
           done
 
       - name: Upload images to Artifact
-        if: ${{ github.event_name != 'release' && success() }}
+        if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: images_${{ matrix.build_variant }}_${{ github.sha }}
           path: ${{ env.images_dir }}/*.trx
 
-      - name: Release
-        if: ${{ github.event_name == 'release' && success() }}
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.images_dir }}/*.trx
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ── 自动创建日期 tag，仅在 push 到 main/master 时运行 ──
-  auto-tag:
-    name: auto tag
+  # ── 自动打 tag + 发布 Release，仅 push 到 main/master ──
+  auto-release:
+    name: auto release
     runs-on: ubuntu-22.04
     needs: build
     if: |
@@ -94,15 +84,42 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate date tag and push
+      - name: Generate tag name
+        id: tag
         run: |
           DATE=$(date -u +%Y.%m.%d)
           SHA8=$(echo "${GITHUB_SHA}" | cut -c1-8)
           TAG="v${DATE}-${SHA8}"
-          echo "Creating tag: $TAG"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: images_mt7621-usb_${{ github.sha }}
+          path: /opt/images
+
+      - name: Create tag
+        run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG" -m "Auto release $TAG"
-          git push origin "$TAG"
+          git tag "${{ steps.tag.outputs.tag }}" -m "Auto release ${{ steps.tag.outputs.tag }}"
+          git push origin "${{ steps.tag.outputs.tag }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          body: |
+            自动构建发布
+
+            - 构建时间：${{ steps.tag.outputs.tag }}
+            - Commit：${{ github.sha }}
+            - 分支：${{ github.ref_name }}
+          files: /opt/images/*.trx
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
