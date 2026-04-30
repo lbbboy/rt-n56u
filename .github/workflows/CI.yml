@@ -1,19 +1,17 @@
 name: CI
 
-# Controls when the action will run. 
-on: 
+on:
   push:
   pull_request:
   workflow_dispatch:
     inputs:
       debug_enabled:
-        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'     
+        description: 'Run the build with tmate debugging enabled'
         required: false
         default: 'no'
   release:
     types: [published]
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   build:
     name: build
@@ -28,39 +26,83 @@ jobs:
         include:
           - build_variant: "mt7621-usb"
             targets: "NEWIFI3"
+
     steps:
       - uses: actions/checkout@v2
+
       - name: Prepare environment
         run: |
           sudo apt update
           sudo apt install libtool-bin gperf python3-docutils autopoint gettext
+
       - name: Run shellcheck
         run: sh ./trunk/tools/shellcheck.sh
+
       - name: Prepare toolchain
         run: |
           cd toolchain-mipsel
           sh dl_toolchain.sh
+
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled == 'yes' }}
         with:
           limit-access-to-actor: true
+
       - name: Start build
         run: |
           cd trunk
           mkdir -p ${images_dir}
-          for m in $targets; do fakeroot ./build_firmware_ci $m; \
-          if [ $? = 0 ]; then cp -f images/*.trx ${images_dir}/$m.trx; else exit 1; fi; \
-          ./clear_tree_simple >/dev/null 2>&1; done
+          for m in $targets; do
+            fakeroot ./build_firmware_ci $m
+            if [ $? = 0 ]; then
+              cp -f images/*.trx ${images_dir}/$m.trx
+            else
+              exit 1
+            fi
+            ./clear_tree_simple >/dev/null 2>&1
+          done
+
       - name: Upload images to Artifact
         if: ${{ github.event_name != 'release' && success() }}
         uses: actions/upload-artifact@v4
         with:
           name: images_${{ matrix.build_variant }}_${{ github.sha }}
           path: ${{ env.images_dir }}/*.trx
+
       - name: Release
+        if: ${{ github.event_name == 'release' && success() }}
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.images_dir }}/*.trx
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 自动创建日期 tag，仅在 push 到 main/master 时运行 ──
+  auto-tag:
+    name: auto tag
+    runs-on: ubuntu-22.04
+    needs: build
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Generate date tag and push
+        run: |
+          DATE=$(date -u +%Y.%m.%d)
+          SHA8=$(echo "${GITHUB_SHA}" | cut -c1-8)
+          TAG="v${DATE}-${SHA8}"
+          echo "Creating tag: $TAG"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" -m "Auto release $TAG"
+          git push origin "$TAG"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
